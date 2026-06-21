@@ -12,7 +12,20 @@ WHATSAPP_PHONE = os.environ["WHATSAPP_PHONE"]
 WHATSAPP_API_KEY = os.environ["WHATSAPP_API_KEY"]
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 
-# 高影響關鍵詞（分級權重）
+# 分析標的（直接 QQQ 與騰訊700）
+TICKERS = {
+    "QQQ": "QQQ",
+    "騰訊700": "0700.HK"
+}
+TRADE_MAP = {"QQQ": "QQQ", "0700.HK": "騰訊700"}
+
+# 新聞搜尋關鍵詞
+NEWS_QUERIES = {
+    "QQQ": "QQQ OR Nasdaq ETF OR US tech stocks",
+    "0700.HK": "騰訊 OR Tencent OR 0700.HK"
+}
+
+# 高影響關鍵詞（權重）
 HIGH_IMPACT_KEYWORDS = {
     "聯儲局加息": 3.0, "fed rate hike": 3.0,
     "聯儲局減息": 3.0, "fed rate cut": 3.0,
@@ -51,59 +64,56 @@ HIGH_IMPACT_KEYWORDS = {
     "衰退": 1.5, "recession": 1.5,
 }
 
-TICKERS = {"納斯達克100指數": "^NDX", "恒生指數": "^HSI"}
-TRADE_MAP = {"^NDX": "QQQ", "^HSI": "騰訊700"}
-NEWS_QUERIES = {
-    "^NDX": "NASDAQ 100 OR NDX OR QQQ OR 納斯達克100",
-    "^HSI": "Hang Seng Index OR 恒生指數 OR 騰訊 OR Tencent"
+# ---------- 重要事件日曆 (簡單字典，可隨時擴充) ----------
+EVENTS = {
+    # 格式：'YYYY-MM-DD': ['事件1', '事件2']
+    '2026-06-19': ['四巫日', '美股期權結算'],
+    '2026-06-22': ['FOMC會議紀錄公佈'],
+    '2026-06-24': ['美國GDP終值'],
+    '2026-07-01': ['香港回歸紀念日休市'],
+    # 持續更新...
 }
 
+def get_today_events():
+    today_str = datetime.date.today().isoformat()
+    return EVENTS.get(today_str, [])
+
 # ----------------------------- 工具函數 -----------------------------
-def get_multi_pivot(ticker):
-    """
-    回傳 dict:
-      daily: {pivot, s1, s2, r1, r2, signal, close}
-      hourly: {pivot, s1, s2, r1, r2, signal, close}
-    """
-    result = {}
+def get_pivot_signal(ticker):
+    """僅用前一日OHLC計算日線Pivot及信號"""
     try:
-        # 日線
-        d = yf.download(ticker, period="5d", interval="1d", progress=False)
-        if len(d) >= 2:
-            prev = d.iloc[-2]
-            h, l, c = float(prev['High']), float(prev['Low']), float(prev['Close'])
-            p = (h + l + c) / 3
-            result['daily'] = {
-                'pivot': p,
-                'r1': 2*p - l, 'r2': p + (h - l),
-                's1': 2*p - h, 's2': p - (h - l),
-                'signal': 1 if c > p else (-1 if c < p else 0),
-                'close': c, 'high': h, 'low': l
-            }
-        # 1小時線
-        h_data = yf.download(ticker, period="5d", interval="1h", progress=False)
-        if len(h_data) >= 2:
-            prev_h = h_data.iloc[-2]
-            hh, hl, hc = float(prev_h['High']), float(prev_h['Low']), float(prev_h['Close'])
-            hp = (hh + hl + hc) / 3
-            result['hourly'] = {
-                'pivot': hp,
-                'r1': 2*hp - hl, 'r2': hp + (hh - hl),
-                's1': 2*hp - hh, 's2': hp - (hh - hl),
-                'signal': 1 if hc > hp else (-1 if hc < hp else 0),
-                'close': hc, 'high': hh, 'low': hl
-            }
+        data = yf.download(ticker, period="2d", progress=False)
+        if len(data) < 2:
+            return None, None, None
+        prev = data.iloc[-2]
+        h, l, c = float(prev['High']), float(prev['Low']), float(prev['Close'])
+        pivot = (h + l + c) / 3
+        r1 = 2 * pivot - l
+        r2 = pivot + (h - l)
+        s1 = 2 * pivot - h
+        s2 = pivot - (h - l)
+        signal = 1 if c > pivot else (-1 if c < pivot else 0)
+        return {
+            'pivot': pivot, 'r1': r1, 'r2': r2,
+            's1': s1, 's2': s2, 'close': c, 'signal': signal,
+            'high': h, 'low': l
+        }, signal, c
     except Exception as e:
-        print(f"Pivot 錯誤: {e}")
-    return result
+        print(f"Pivot錯誤 {ticker}: {e}")
+        return None, None, None
 
 def fetch_news(query, from_date, to_date):
+    """抓取過去一週新聞"""
     if NEWSAPI_KEY:
         url = "https://newsapi.org/v2/everything"
         params = {
-            "q": query, "from": from_date, "to": to_date,
-            "language": "en", "sortBy": "relevancy",
-            "apiKey": NEWSAPI_KEY, "pageSize": 10
+            "q": query,
+            "from": from_date,
+            "to": to_date,
+            "language": "en",
+            "sortBy": "relevancy",
+            "apiKey": NEWSAPI_KEY,
+            "pageSize": 10
         }
         resp = requests.get(url, params=params)
         if resp.status_code == 200:
@@ -130,8 +140,10 @@ def analyze_news(news_titles):
                 break
         score = sid.polarity_scores(title)['compound']
         details.append((title, score, weight))
+    if not details:
+        return 0, [], []
     total_w = sum(d[2] for d in details)
-    avg = sum(d[1]*d[2] for d in details) / total_w if total_w else 0
+    avg = sum(d[1]*d[2] for d in details) / total_w
     top3 = sorted(details, key=lambda x: abs(x[1]*x[2]), reverse=True)[:3]
     return avg, details, top3
 
@@ -150,56 +162,54 @@ def send_report_safe(report, max_chars=1400):
         for i in range(0, len(report), max_chars):
             send_whatsapp(report[i:i+max_chars])
 
-# ----------------------------- 報告產生（含目標價位） -----------------------------
-def build_enhanced_report(name, ticker, trade_inst, pivots, news_avg, top3_news):
+# ----------------------------- 報告產生 -----------------------------
+def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events):
     today = datetime.date.today().isoformat()
-    daily = pivots.get('daily')
-    hourly = pivots.get('hourly')
-    if not daily:
+    if not pivot_data:
         return None
 
-    price = daily['close']
-    # 多週期狀態
-    pivot_status = []
-    if daily:
-        pos = []
-        if price > daily['r1']: pos.append("破R1")
-        elif price > daily['pivot']: pos.append("站上Pivot")
-        elif price > daily['s1']: pos.append("守S1")
-        elif price > daily['s2']: pos.append("測S2")
-        else: pos.append("破S2")
-        pivot_status.append(f"日:{'/'.join(pos)}")
-    if hourly:
-        hpos = []
-        if price > hourly['r1']: hpos.append("破R1")
-        elif price > hourly['pivot']: hpos.append("站上Pivot")
-        elif price > hourly['s1']: hpos.append("守S1")
-        elif price > hourly['s2']: hpos.append("測S2")
-        else: hpos.append("破S2")
-        pivot_status.append(f"時:{'/'.join(hpos)}")
+    p = pivot_data
+    price = p['close']
+    pivot = p['pivot']
+    r1, r2 = p['r1'], p['r2']
+    s1, s2 = p['s1'], p['s2']
 
-    # 綜合信號
-    d_signal = daily['signal']
-    h_signal = hourly['signal'] if hourly else 0
-    news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
-    final_score = 0.3*d_signal + 0.2*h_signal + 0.5*news_signal
-
-    # 目標價位 (基於日線Pivot)
-    r1, r2 = daily['r1'], daily['r2']
-    s1, s2 = daily['s1'], daily['s2']
-    target_text = ""
-    if final_score > 0.3:
-        prediction = "📈 上升"
-        target_text = f"從 {price:.0f} 升至\n阻力: {r1:.0f}(R1) / {r2:.0f}(R2)"
-        reason = "技術偏多+新聞正面"
-    elif final_score < -0.3:
-        prediction = "📉 下跌"
-        target_text = f"從 {price:.0f} 跌至\n支撐: {s1:.0f}(S1) / {s2:.0f}(S2)"
-        reason = "技術偏空+新聞負面"
+    # 價格相對Pivot位置
+    if price > r1:
+        pos = "站上R1"
+    elif price > pivot:
+        pos = "Pivot之上"
+    elif price > s1:
+        pos = "守S1"
+    elif price > s2:
+        pos = "測S2"
     else:
-        prediction = "↔️ 震盪"
-        target_text = f"震盪區間\n支撐 {s1:.0f}(S1)~{s2:.0f}(S2)  阻力 {r1:.0f}(R1)~{r2:.0f}(R2)"
-        reason = "多空拉鋸，方向不明"
+        pos = "破S2"
+
+    # 新聞信號
+    news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
+
+    # 綜合分數 (技術50%, 新聞50%)
+    final_score = 0.5 * p['signal'] + 0.5 * news_signal
+
+    # 事件影響提示
+    event_str = ""
+    if events:
+        event_str = "⚠️ 今日事件: " + ", ".join(events) + "\n"
+
+    # 操作建議
+    if final_score > 0.4:
+        action = "📈 做多 (Long)"
+        detail = "強勢上升，順勢做多"
+        target = f"目標阻力: R1 {r1:.1f} / R2 {r2:.1f}"
+    elif final_score < -0.4:
+        action = "📉 做空 (Short)"
+        detail = "弱勢下跌，順勢做空"
+        target = f"目標支撐: S1 {s1:.1f} / S2 {s2:.1f}"
+    else:
+        action = "⚡ 剝頭皮 (Scalping)"
+        detail = "震盪格局，區間操作"
+        target = f"區間: {s2:.1f} ~ {r2:.1f}"
 
     # 新聞亮點
     news_lines = []
@@ -208,14 +218,15 @@ def build_enhanced_report(name, ticker, trade_inst, pivots, news_avg, top3_news)
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
     report = (
-        f"📅{today} {name}({trade_inst})\n"
-        f"預測：{prediction}\n"
-        f"{target_text}\n"
-        f"Pivot狀態：{'，'.join(pivot_status)}\n"
-        f"新聞情緒：{news_avg:.2f} (信號:{news_signal})\n"
-        f"--- 最關鍵新聞 ---\n" +
-        "\n".join(news_lines) + "\n"
-        f"總結：{reason}，綜合分數 {final_score:.2f}"
+        f"📅 {today} | {name} ({trade_inst})\n"
+        f"{event_str}"
+        f"💰 前收: {price:.1f}  樞軸: {pivot:.1f}\n"
+        f"📍 位置: {pos}\n"
+        f"🗞️ 新聞情緒: {news_avg:.2f} (信號{news_signal})\n"
+        f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
+        f"🧠 操作建議: {action}\n"
+        f"{target}\n"
+        f"理由: {detail}"
     )
     return report
 
@@ -224,26 +235,35 @@ def main():
     target = None
     if len(sys.argv) > 1:
         arg = sys.argv[1].upper()
-        if arg == "HSI": target = "^HSI"
-        elif arg == "NDX": target = "^NDX"
+        if arg == "QQQ":
+            target = "QQQ"
+        elif arg == "700":
+            target = "0700.HK"
 
     today = datetime.date.today()
-    yesterday = today - datetime.timedelta(days=1)
+    week_ago = today - datetime.timedelta(days=7)  # 過去一週新聞
+    events = get_today_events()
 
     for name, ticker in TICKERS.items():
         if target and ticker != target:
             continue
-        pivots = get_multi_pivot(ticker)
-        if not pivots.get('daily'):
-            send_whatsapp(f"⚠️ {name} 資料不足")
+
+        # 1. Pivot
+        pivot_data, _, _ = get_pivot_signal(ticker)
+        if not pivot_data:
+            send_whatsapp(f"⚠️ {name} 數據缺失")
             continue
+
+        # 2. 新聞（一週）
         query = NEWS_QUERIES.get(ticker, name)
-        titles = fetch_news(query, yesterday.isoformat(), today.isoformat())
+        titles = fetch_news(query, week_ago.isoformat(), today.isoformat())
         if not titles:
             titles = ["無相關新聞"]
         news_avg, _, top3 = analyze_news(titles)
-        report = build_enhanced_report(name, ticker, TRADE_MAP[ticker],
-                                       pivots, news_avg, top3)
+
+        # 3. 報告
+        report = build_report(name, ticker, TRADE_MAP.get(ticker, name),
+                             pivot_data, news_avg, top3, events)
         if report:
             send_report_safe(report)
 
