@@ -1,0 +1,20 @@
+name: Daily Stock Prediction
+on:
+  schedule:
+    # UTC 時間 12:30 執行 → 美國東部夏令 08:30（美股盤前）、香港約 20:30
+    - cron: '30 12 * * *'
+  workflow_dispatch:   # 允許手動觸發測試
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - run: python predict.py
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          WHATSAPP_API_KEY: ${{ secrets.WHATSAPP_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
