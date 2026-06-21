@@ -148,7 +148,7 @@ def send_report_safe(report, max_chars=1400):
         for i in range(0, len(report), max_chars):
             send_whatsapp(report[i:i+max_chars])
 
-# ----------------------------- 報告產生 (含具體交易觸發) -----------------------------
+# ----------------------------- 報告產生（只顯示一個預測） -----------------------------
 def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events):
     today = datetime.date.today()
     if not pivot_data:
@@ -160,19 +160,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     r1, r2 = p['r1'], p['r2']
     s1, s2 = p['s1'], p['s2']
 
-    # 價格位置
-    if price > r1:
-        pos = "站上R1"
-    elif price > pivot:
-        pos = "Pivot之上"
-    elif price > s1:
-        pos = "守S1"
-    elif price > s2:
-        pos = "測S2"
-    else:
-        pos = "破S2"
-
-    # 新聞信號
+    # 綜合分數
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
     final_score = 0.5 * p['signal'] + 0.5 * news_signal
 
@@ -187,23 +175,31 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # === 具體交易計劃 ===
-    # 固定使用 Pivot 點位給出觸發價格，不受預測傾向影響
-    trade_plan = (
-        f"📊 交易計劃 (下個交易日 {today.isoformat()}):\n"
-        f"   🟢 做多觸發: 價格突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 {pivot:.2f} (Pivot)\n"
-        f"   🔴 做空觸發: 價格跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 {pivot:.2f}\n"
-        f"   ⚪ 震盪區間: 價格在 {s1:.2f} ~ {r1:.2f} 內震盪，可高拋低吸，或等待突破"
-    )
+    # --- 單一最可能預測與操作 ---
+    if final_score > 0.4:
+        prediction = "📈 上升 (做多)"
+        plan = (
+            f"操作：突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 Pivot {pivot:.2f}"
+        )
+    elif final_score < -0.4:
+        prediction = "📉 下跌 (做空)"
+        plan = (
+            f"操作：跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 Pivot {pivot:.2f}"
+        )
+    else:
+        prediction = "↔️ 震盪 (區間交易)"
+        plan = (
+            f"操作：於 S1 {s1:.2f} 附近做多，R1 {r1:.2f} 附近做空，止損設區間外 S2 {s2:.2f} / R2 {r2:.2f}"
+        )
 
     report = (
         f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
         f"💰 前收: {price:.2f}  樞軸: {pivot:.2f}\n"
-        f"📍 位置: {pos}\n"
-        f"🗞️ 新聞情緒: {news_avg:.2f} (信號{news_signal})\n"
+        f"🗞️ 新聞情緒: {news_avg:.2f}\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
-        f"{trade_plan}"
+        f"🎯 預測: {prediction}\n"
+        f"{plan}"
     )
     return report
 
