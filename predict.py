@@ -12,20 +12,17 @@ WHATSAPP_PHONE = os.environ["WHATSAPP_PHONE"]
 WHATSAPP_API_KEY = os.environ["WHATSAPP_API_KEY"]
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 
-# 分析標的（直接 QQQ 與騰訊700）
 TICKERS = {
     "QQQ": "QQQ",
     "騰訊700": "0700.HK"
 }
 TRADE_MAP = {"QQQ": "QQQ", "0700.HK": "騰訊700"}
 
-# 新聞搜尋關鍵詞
 NEWS_QUERIES = {
     "QQQ": "QQQ OR Nasdaq ETF OR US tech stocks",
     "0700.HK": "騰訊 OR Tencent OR 0700.HK"
 }
 
-# 高影響關鍵詞（權重）
 HIGH_IMPACT_KEYWORDS = {
     "聯儲局加息": 3.0, "fed rate hike": 3.0,
     "聯儲局減息": 3.0, "fed rate cut": 3.0,
@@ -64,23 +61,18 @@ HIGH_IMPACT_KEYWORDS = {
     "衰退": 1.5, "recession": 1.5,
 }
 
-# ---------- 重要事件日曆 (簡單字典，可隨時擴充) ----------
 EVENTS = {
-    # 格式：'YYYY-MM-DD': ['事件1', '事件2']
     '2026-06-19': ['四巫日', '美股期權結算'],
     '2026-06-22': ['FOMC會議紀錄公佈'],
     '2026-06-24': ['美國GDP終值'],
     '2026-07-01': ['香港回歸紀念日休市'],
-    # 持續更新...
 }
 
 def get_today_events():
-    today_str = datetime.date.today().isoformat()
-    return EVENTS.get(today_str, [])
+    return EVENTS.get(datetime.date.today().isoformat(), [])
 
 # ----------------------------- 工具函數 -----------------------------
 def get_pivot_signal(ticker):
-    """僅用前一日OHLC計算日線Pivot及信號"""
     try:
         data = yf.download(ticker, period="2d", progress=False)
         if len(data) < 2:
@@ -103,23 +95,17 @@ def get_pivot_signal(ticker):
         return None, None, None
 
 def fetch_news(query, from_date, to_date):
-    """抓取過去一週新聞"""
     if NEWSAPI_KEY:
         url = "https://newsapi.org/v2/everything"
         params = {
-            "q": query,
-            "from": from_date,
-            "to": to_date,
-            "language": "en",
-            "sortBy": "relevancy",
-            "apiKey": NEWSAPI_KEY,
-            "pageSize": 10
+            "q": query, "from": from_date, "to": to_date,
+            "language": "en", "sortBy": "relevancy",
+            "apiKey": NEWSAPI_KEY, "pageSize": 10
         }
         resp = requests.get(url, params=params)
         if resp.status_code == 200:
             articles = resp.json().get("articles", [])
             return [a["title"] for a in articles if a["title"]]
-    # 後備 RSS
     try:
         import feedparser
         rss = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=en-US"
@@ -162,9 +148,9 @@ def send_report_safe(report, max_chars=1400):
         for i in range(0, len(report), max_chars):
             send_whatsapp(report[i:i+max_chars])
 
-# ----------------------------- 報告產生 -----------------------------
+# ----------------------------- 報告產生 (含具體交易觸發) -----------------------------
 def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events):
-    today = datetime.date.today().isoformat()
+    today = datetime.date.today()
     if not pivot_data:
         return None
 
@@ -174,7 +160,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     r1, r2 = p['r1'], p['r2']
     s1, s2 = p['s1'], p['s2']
 
-    # 價格相對Pivot位置
+    # 價格位置
     if price > r1:
         pos = "站上R1"
     elif price > pivot:
@@ -188,28 +174,12 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
 
     # 新聞信號
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
-
-    # 綜合分數 (技術50%, 新聞50%)
     final_score = 0.5 * p['signal'] + 0.5 * news_signal
 
-    # 事件影響提示
+    # 事件
     event_str = ""
     if events:
         event_str = "⚠️ 今日事件: " + ", ".join(events) + "\n"
-
-    # 操作建議
-    if final_score > 0.4:
-        action = "📈 做多 (Long)"
-        detail = "強勢上升，順勢做多"
-        target = f"目標阻力: R1 {r1:.1f} / R2 {r2:.1f}"
-    elif final_score < -0.4:
-        action = "📉 做空 (Short)"
-        detail = "弱勢下跌，順勢做空"
-        target = f"目標支撐: S1 {s1:.1f} / S2 {s2:.1f}"
-    else:
-        action = "⚡ 剝頭皮 (Scalping)"
-        detail = "震盪格局，區間操作"
-        target = f"區間: {s2:.1f} ~ {r2:.1f}"
 
     # 新聞亮點
     news_lines = []
@@ -217,16 +187,23 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
+    # === 具體交易計劃 ===
+    # 固定使用 Pivot 點位給出觸發價格，不受預測傾向影響
+    trade_plan = (
+        f"📊 交易計劃 (下個交易日 {today.isoformat()}):\n"
+        f"   🟢 做多觸發: 價格突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 {pivot:.2f} (Pivot)\n"
+        f"   🔴 做空觸發: 價格跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 {pivot:.2f}\n"
+        f"   ⚪ 震盪區間: 價格在 {s1:.2f} ~ {r1:.2f} 內震盪，可高拋低吸，或等待突破"
+    )
+
     report = (
-        f"📅 {today} | {name} ({trade_inst})\n"
+        f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
-        f"💰 前收: {price:.1f}  樞軸: {pivot:.1f}\n"
+        f"💰 前收: {price:.2f}  樞軸: {pivot:.2f}\n"
         f"📍 位置: {pos}\n"
         f"🗞️ 新聞情緒: {news_avg:.2f} (信號{news_signal})\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
-        f"🧠 操作建議: {action}\n"
-        f"{target}\n"
-        f"理由: {detail}"
+        f"{trade_plan}"
     )
     return report
 
@@ -241,27 +218,24 @@ def main():
             target = "0700.HK"
 
     today = datetime.date.today()
-    week_ago = today - datetime.timedelta(days=7)  # 過去一週新聞
+    week_ago = today - datetime.timedelta(days=7)
     events = get_today_events()
 
     for name, ticker in TICKERS.items():
         if target and ticker != target:
             continue
 
-        # 1. Pivot
         pivot_data, _, _ = get_pivot_signal(ticker)
         if not pivot_data:
             send_whatsapp(f"⚠️ {name} 數據缺失")
             continue
 
-        # 2. 新聞（一週）
         query = NEWS_QUERIES.get(ticker, name)
         titles = fetch_news(query, week_ago.isoformat(), today.isoformat())
         if not titles:
             titles = ["無相關新聞"]
         news_avg, _, top3 = analyze_news(titles)
 
-        # 3. 報告
         report = build_report(name, ticker, TRADE_MAP.get(ticker, name),
                              pivot_data, news_avg, top3, events)
         if report:
