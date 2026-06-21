@@ -133,6 +133,69 @@ def analyze_news(news_titles):
     top3 = sorted(details, key=lambda x: abs(x[1]*x[2]), reverse=True)[:3]
     return avg, details, top3
 
+def get_fundamental_signal(ticker):
+    """
+    取得簡易基本面信號:
+    signal: -1 (高估), 0 (合理), 1 (低估)
+    text: 簡短描述
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+
+        pe = info.get('forwardPE') or info.get('trailingPE')
+        pb = info.get('priceToBook')
+        div_yield = info.get('dividendYield')
+
+        # 根據標的設定不同的閾值
+        if ticker == "QQQ":
+            # QQQ 是科技成長型，PE 通常較高
+            pe_low, pe_high = 25, 35
+            pb_high = 8
+        else:  # 騰訊
+            pe_low, pe_high = 15, 25
+            pb_high = 5
+
+        signals = []
+        details = []
+
+        if pe:
+            details.append(f"PE:{pe:.1f}")
+            if pe < pe_low:
+                signals.append(1)
+            elif pe > pe_high:
+                signals.append(-1)
+            else:
+                signals.append(0)
+
+        if pb:
+            details.append(f"PB:{pb:.1f}")
+            if pb > pb_high:
+                signals.append(-1)
+            else:
+                signals.append(0)
+
+        if div_yield and div_yield > 0.03:
+            details.append(f"息率:{div_yield*100:.1f}%")
+            signals.append(1)
+
+        if not signals:
+            return 0, "無足夠數據"
+
+        avg_signal = sum(signals) / len(signals)
+        if avg_signal > 0.3:
+            signal, ver = 1, "低估"
+        elif avg_signal < -0.3:
+            signal, ver = -1, "高估"
+        else:
+            signal, ver = 0, "合理"
+
+        text = f"{ver} ({', '.join(details)})"
+        return signal, text
+    except Exception as e:
+        print(f"基本面取得失敗 {ticker}: {e}")
+        return 0, "數據缺失"
+
 def send_whatsapp(text):
     encoded = urllib.parse.quote(text)
     url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={encoded}&apikey={WHATSAPP_API_KEY}"
@@ -148,8 +211,8 @@ def send_report_safe(report, max_chars=1400):
         for i in range(0, len(report), max_chars):
             send_whatsapp(report[i:i+max_chars])
 
-# ----------------------------- 報告產生（只顯示一個預測） -----------------------------
-def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events):
+# ----------------------------- 報告產生 -----------------------------
+def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events, fund_signal, fund_text):
     today = datetime.date.today()
     if not pivot_data:
         return None
@@ -160,42 +223,36 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     r1, r2 = p['r1'], p['r2']
     s1, s2 = p['s1'], p['s2']
 
-    # 綜合分數
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
-    final_score = 0.5 * p['signal'] + 0.5 * news_signal
 
-    # 事件
+    # 綜合分數：技術 30% + 新聞 40% + 基本面 30%
+    final_score = 0.3 * p['signal'] + 0.4 * news_signal + 0.3 * fund_signal
+
     event_str = ""
     if events:
         event_str = "⚠️ 今日事件: " + ", ".join(events) + "\n"
 
-    # 新聞亮點
     news_lines = []
     for title, score, weight in top3_news:
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # --- 單一最可能預測與操作 ---
+    # 單一最可能預測與操作
     if final_score > 0.4:
         prediction = "📈 上升 (做多)"
-        plan = (
-            f"操作：突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 Pivot {pivot:.2f}"
-        )
+        plan = f"操作：突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 Pivot {pivot:.2f}"
     elif final_score < -0.4:
         prediction = "📉 下跌 (做空)"
-        plan = (
-            f"操作：跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 Pivot {pivot:.2f}"
-        )
+        plan = f"操作：跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 Pivot {pivot:.2f}"
     else:
         prediction = "↔️ 震盪 (區間交易)"
-        plan = (
-            f"操作：於 S1 {s1:.2f} 附近做多，R1 {r1:.2f} 附近做空，止損設區間外 S2 {s2:.2f} / R2 {r2:.2f}"
-        )
+        plan = f"操作：於 S1 {s1:.2f} 附近做多，R1 {r1:.2f} 附近做空，止損設區間外 S2 {s2:.2f} / R2 {r2:.2f}"
 
     report = (
         f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
         f"💰 前收: {price:.2f}  樞軸: {pivot:.2f}\n"
+        f"📊 基本面: {fund_text}\n"
         f"🗞️ 新聞情緒: {news_avg:.2f}\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
         f"🎯 預測: {prediction}\n"
@@ -232,8 +289,11 @@ def main():
             titles = ["無相關新聞"]
         news_avg, _, top3 = analyze_news(titles)
 
+        fund_signal, fund_text = get_fundamental_signal(ticker)
+
         report = build_report(name, ticker, TRADE_MAP.get(ticker, name),
-                             pivot_data, news_avg, top3, events)
+                             pivot_data, news_avg, top3, events,
+                             fund_signal, fund_text)
         if report:
             send_report_safe(report)
 
