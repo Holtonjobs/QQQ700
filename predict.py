@@ -83,6 +83,7 @@ def load_weights():
 
 # ----------------------------- 工具函數 -----------------------------
 def get_pivot_traditional(ticker):
+    """計算 Traditional Pivot，回傳 dict 及原始信號"""
     try:
         data = yf.download(ticker, period="2d", progress=False)
         if len(data) < 2:
@@ -99,15 +100,27 @@ def get_pivot_traditional(ticker):
         r3 = 2 * pp + (h - 2 * l)
         s3 = 2 * pp - (2 * h - l)
 
-        signal = 1 if c > pp else (-1 if c < pp else 0)
+        # 五級技術信號 (raw_signal)
+        if c > r2:
+            raw_signal = 1.5
+        elif c > r1:
+            raw_signal = 1.0
+        elif c > pp:
+            raw_signal = 0.5
+        elif c > s1:
+            raw_signal = -0.5
+        elif c > s2:
+            raw_signal = -1.0
+        else:
+            raw_signal = -1.5
 
         return {
             'pp': pp,
             'r1': r1, 'r2': r2, 'r3': r3,
             's1': s1, 's2': s2, 's3': s3,
-            'close': c, 'signal': signal,
+            'close': c, 'signal': raw_signal,
             'high': h, 'low': l, 'range': rng
-        }, signal, c
+        }, raw_signal, c
     except Exception as e:
         print(f"Pivot錯誤 {ticker}: {e}")
         return None, None, None
@@ -225,7 +238,6 @@ def send_report_safe(report, max_chars=1400):
 
 # ----------------------------- 昨日表現回顧與權重微調 -----------------------------
 def get_yesterday_actual_direction(ticker):
-    """回傳昨日實際方向：1(升), -1(跌), 0(平)"""
     try:
         data = yf.download(ticker, period="3d", progress=False)
         if len(data) < 3:
@@ -245,16 +257,14 @@ def get_yesterday_actual_direction(ticker):
         return None
 
 def adjust_weights_and_threshold(ticker, base_weights):
-    """根據昨日預測與實際對比，回傳 (adjusted_weights, adjusted_threshold)"""
     history_file = f"history_{TRADE_MAP[ticker]}.json"
     yesterday_str = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
     try:
         with open(history_file, "r") as f:
             history = json.load(f)
     except:
-        return base_weights, 0.4   # 無歷史記錄，回傳預設值
+        return base_weights, 0.4
 
-    # 尋找昨天的預測記錄
     yesterday_entry = None
     for entry in reversed(history):
         if entry.get("date") == yesterday_str:
@@ -263,12 +273,10 @@ def adjust_weights_and_threshold(ticker, base_weights):
     if not yesterday_entry:
         return base_weights, 0.4
 
-    # 取得昨日實際方向
     actual_dir = get_yesterday_actual_direction(ticker)
     if actual_dir is None:
         return base_weights, 0.4
 
-    # 計算各組件的預測方向（用 >0.15 / <-0.15 離散化）
     def sig_to_dir(val):
         return 1 if val > 0.15 else (-1 if val < -0.15 else 0)
 
@@ -278,30 +286,24 @@ def adjust_weights_and_threshold(ticker, base_weights):
     final_score = yesterday_entry.get("final_score", 0)
     overall_dir = 1 if final_score > 0.4 else (-1 if final_score < -0.4 else 0)
 
-    # 動態調整各組件權重
     adj = base_weights.copy()
-    # 技術
     if tech_dir == actual_dir:
         adj["tech"] *= 1.1
     else:
         adj["tech"] *= 0.8
-    # 新聞
     if news_dir == actual_dir:
         adj["news"] *= 1.1
     else:
         adj["news"] *= 0.8
-    # 基本面
     if fund_dir == actual_dir:
         adj["fund"] *= 1.1
     else:
         adj["fund"] *= 0.8
 
-    # 歸一化
     total = sum(adj.values())
     for k in adj:
         adj[k] /= total
 
-    # 門檻調整：若整體預測錯誤，提高門檻
     new_threshold = 0.4
     if overall_dir != actual_dir and overall_dir != 0:
         new_threshold = 0.55
@@ -327,7 +329,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
 
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
 
-    # 新聞極度中性時仍動態調權（與昨日調整疊加）
+    # 動態權重調整：新聞中性時提高技術權重
     adj_weights = weights.copy()
     if abs(news_avg) <= 0.1:
         adj_weights["tech"] = min(0.6, adj_weights["tech"] + 0.1)
@@ -336,6 +338,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         for k in adj_weights:
             adj_weights[k] /= total
 
+    # 盤前突破調整
     pre_bonus = 0
     pre_note = ""
     if pre_price:
@@ -351,7 +354,12 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         elif pre_price < pp:
             pre_bonus = -0.1
 
-    final_score = (adj_weights["tech"] * (p['signal'] + pre_bonus) +
+    # 技術信號已為五級 raw_signal，若低波動則衰減
+    raw_tech = p['signal']
+    if is_low_vol:
+        raw_tech *= 0.6
+
+    final_score = (adj_weights["tech"] * (raw_tech + pre_bonus) +
                    adj_weights["news"] * news_signal +
                    adj_weights["fund"] * fund_signal)
 
@@ -364,11 +372,11 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # 最終門檻：低波動時再稍微提高
     final_threshold = threshold
     if is_low_vol:
         final_threshold = max(final_threshold, 0.5)
 
+    # 操作建議
     if final_score > final_threshold:
         prediction = "📈 上升 (做多)"
         entry = r1
@@ -378,7 +386,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         risk = entry - stop
         if reward / risk < 1.5:
             plan = (f"⚠️ 盈虧比不佳 ({reward/risk:.1f})，建議觀望\n"
-                    f"若仍想操作：突破 R1 {r1:.2f} 後買入看漲，目標 R2 {r2:.2f}，止損 PP {pp:.2f}")
+                    f"若仍想操作：突破 R1 {r1:.2f} 買入看漲，目標 R2 {r2:.2f}，止損 PP {pp:.2f}")
         else:
             plan = (f"入場：突破 R1 {r1:.2f} 後買入看漲期權\n"
                     f"目標：R2 {r2:.2f}，延伸 R3 {r3:.2f}\n"
@@ -393,7 +401,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         risk = stop - entry
         if reward / risk < 1.5:
             plan = (f"⚠️ 盈虧比不佳 ({reward/risk:.1f})，建議觀望\n"
-                    f"若仍想操作：跌破 S1 {s1:.2f} 後買入看跌，目標 S2 {s2:.2f}，止損 PP {pp:.2f}")
+                    f"若仍想操作：跌破 S1 {s1:.2f} 買入看跌，目標 S2 {s2:.2f}，止損 PP {pp:.2f}")
         else:
             plan = (f"入場：跌破 S1 {s1:.2f} 後買入看跌期權\n"
                     f"目標：S2 {s2:.2f}，延伸 S3 {s3:.2f}\n"
@@ -426,7 +434,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     )
 
     signals = {
-        "tech_signal": p['signal'],
+        "tech_signal": raw_tech,
         "news_signal": news_signal,
         "fund_signal": fund_signal,
         "final_score": final_score
@@ -452,29 +460,29 @@ def main():
         if target and ticker != target:
             continue
 
-        # 1. 取得昨日預測vs實際，即時調整權重與門檻
+        # 動態權重與門檻調整
         adj_weights, threshold = adjust_weights_and_threshold(ticker, base_weights)
 
-        # 2. 樞軸點計算
+        # Pivot 計算
         pivot_data, _, _ = get_pivot_traditional(ticker)
         if not pivot_data:
             send_whatsapp(f"⚠️ {name} 數據缺失")
             continue
 
-        # 3. 盤前價格
+        # 盤前價格
         pre_price, pre_chg = get_premarket_change(ticker)
 
-        # 4. 新聞
+        # 新聞
         query = NEWS_QUERIES.get(ticker, name)
         titles = fetch_news(query, since, today.isoformat())
         if not titles:
             titles = ["無相關新聞"]
         news_avg, _, top3 = analyze_news(titles)
 
-        # 5. 基本面
+        # 基本面
         fund_signal, fund_text = get_fundamental_signal(ticker)
 
-        # 6. 生成報告
+        # 生成報告
         report, signals = build_report(name, ticker, TRADE_MAP.get(ticker, name),
                                        pivot_data, news_avg, top3, events,
                                        fund_signal, fund_text, pre_price, pre_chg,
@@ -482,7 +490,7 @@ def main():
         if report:
             send_report_safe(report)
 
-            # 寫入歷史
+            # 記錄歷史
             history_file = f"history_{TRADE_MAP[ticker]}.json"
             entry = {
                 "date": today.isoformat(),
