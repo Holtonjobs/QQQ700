@@ -1,7 +1,7 @@
 name: Predict QQQ
 on:
   schedule:
-    - cron: '0 13 * * *'   # UTC 13:00 = 香港 21:00
+    - cron: '0 6 * * *'   # UTC 13:00 = 香港 21:00
   workflow_dispatch:
 jobs:
   predict:
