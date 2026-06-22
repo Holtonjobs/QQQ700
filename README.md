@@ -1,4 +1,2 @@
 # QQQ700
-AI analysis
- 
- 
+AI analysis 
