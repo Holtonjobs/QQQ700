@@ -1,0 +1,40 @@
+name: External Trigger
+on:
+  repository_dispatch:
+    types: [run-prediction]
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.set-target.outputs.target }}
+    steps:
+      - name: Set target based on hour
+        id: set-target
+        env:
+          HOUR_UTC: ${{ github.event.client_payload.hour }}
+        run: |
+          # 傳入 UTC 小時，決定分析哪個標的
+          if [ "$HOUR_UTC" = "1" ]; then
+            echo "target=700" >> $GITHUB_OUTPUT
+          elif [ "$HOUR_UTC" = "13" ]; then
+            echo "target=QQQ" >> $GITHUB_OUTPUT
+          else
+            echo "target=none" >> $GITHUB_OUTPUT
+          fi
+  predict:
+    needs: decide
+    if: needs.decide.outputs.target != 'none'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run prediction
+        run: python predict.py ${{ needs.decide.outputs.target }}
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          WHATSAPP_API_KEY: ${{ secrets.WHATSAPP_API_KEY }}
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
