@@ -25,7 +25,6 @@ NEWS_QUERIES = {
 }
 
 HIGH_IMPACT_KEYWORDS = {
-    # 保持你原有的完整字典
     "聯儲局加息": 3.0, "fed rate hike": 3.0,
     "聯儲局減息": 3.0, "fed rate cut": 3.0,
     "縮表": 3.0, "量化緊縮": 3.0, "quantitative tightening": 3.0,
@@ -70,21 +69,19 @@ EVENTS = {
     '2026-07-01': ['香港回歸紀念日休市'],
 }
 
-# 預設權重（若無 weights.json 則使用）
 DEFAULT_WEIGHTS = {"tech": 0.4, "news": 0.4, "fund": 0.2}
 
-# ----------------------------- 工具函數 -----------------------------
 def get_today_events():
     return EVENTS.get(datetime.date.today().isoformat(), [])
 
 def load_weights():
-    """從 weights.json 讀取各組件權重，若無則回傳預設值"""
     try:
         with open("weights.json", "r") as f:
             return json.load(f)
     except:
         return DEFAULT_WEIGHTS
 
+# ----------------------------- 工具函數 -----------------------------
 def get_pivot_signal(ticker):
     try:
         data = yf.download(ticker, period="2d", progress=False)
@@ -221,7 +218,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
                  fund_signal, fund_text, pre_price, pre_chg, weights):
     today = datetime.date.today()
     if not pivot_data:
-        return None, None  # 第二個回傳值為信號字典
+        return None, None
 
     p = pivot_data
     price = p['close']
@@ -231,7 +228,6 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
 
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
 
-    # 盤前調整
     pre_bonus = 0
     pre_note = ""
     if pre_price:
@@ -247,7 +243,6 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         elif pre_price < pivot:
             pre_bonus = -0.1
 
-    # 使用動態權重計算最終分數
     final_score = (weights["tech"] * (p['signal'] + pre_bonus) +
                    weights["news"] * news_signal +
                    weights["fund"] * fund_signal)
@@ -261,7 +256,7 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # 預測與操作
+    # 操作建議（震盪改為有限風險買方策略）
     if final_score > 0.4:
         prediction = "📈 上升 (做多)"
         plan = (
@@ -279,8 +274,9 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     else:
         prediction = "↔️ 震盪 (區間交易)"
         plan = (
-            f"入場：於 S1 {s1:.2f} 賣出看跌期權，R1 {r1:.2f} 賣出看漲期權\n"
-            f"止損：標的突破 S2 {s2:.2f} 或 R2 {r2:.2f} 立即平倉"
+            f"操作：於支撐 S1 {s1:.2f} 附近買入看漲期權，目標 R1 {r1:.2f}\n"
+            f"　　　或於阻力 R1 {r1:.2f} 附近買入看跌期權，目標 S1 {s1:.2f}\n"
+            f"止損：價格突破 S2 {s2:.2f} 或 R2 {r2:.2f}，平倉反向單"
         )
 
     report = (
@@ -296,7 +292,6 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         f"⚡ 0DTE警告：嚴格止損，時間價值損耗快，僅限極短線。"
     )
 
-    # 返回報告文字與信號字典（用於寫入歷史）
     signals = {
         "tech_signal": p['signal'],
         "news_signal": news_signal,
@@ -319,7 +314,7 @@ def main():
     today = datetime.date.today()
     since = (today - datetime.timedelta(days=1)).isoformat()
     events = get_today_events()
-    weights = load_weights()  # 讀取最新權重
+    weights = load_weights()
 
     for name, ticker in TICKERS.items():
         if target and ticker != target:
@@ -346,7 +341,7 @@ def main():
         if report:
             send_report_safe(report)
 
-            # 寫入歷史記錄（供 update_weights.py 使用）
+            # 寫入歷史記錄
             history_file = f"history_{TRADE_MAP[ticker]}.json"
             entry = {
                 "date": today.isoformat(),
