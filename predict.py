@@ -6,6 +6,7 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import os
 import urllib.parse
 import sys
+import json
 
 # ----------------------------- 設定 -----------------------------
 WHATSAPP_PHONE = os.environ["WHATSAPP_PHONE"]
@@ -24,6 +25,7 @@ NEWS_QUERIES = {
 }
 
 HIGH_IMPACT_KEYWORDS = {
+    # 保持你原有的完整字典
     "聯儲局加息": 3.0, "fed rate hike": 3.0,
     "聯儲局減息": 3.0, "fed rate cut": 3.0,
     "縮表": 3.0, "量化緊縮": 3.0, "quantitative tightening": 3.0,
@@ -68,10 +70,21 @@ EVENTS = {
     '2026-07-01': ['香港回歸紀念日休市'],
 }
 
+# 預設權重（若無 weights.json 則使用）
+DEFAULT_WEIGHTS = {"tech": 0.4, "news": 0.4, "fund": 0.2}
+
+# ----------------------------- 工具函數 -----------------------------
 def get_today_events():
     return EVENTS.get(datetime.date.today().isoformat(), [])
 
-# ----------------------------- 工具函數 -----------------------------
+def load_weights():
+    """從 weights.json 讀取各組件權重，若無則回傳預設值"""
+    try:
+        with open("weights.json", "r") as f:
+            return json.load(f)
+    except:
+        return DEFAULT_WEIGHTS
+
 def get_pivot_signal(ticker):
     try:
         data = yf.download(ticker, period="2d", progress=False)
@@ -93,6 +106,18 @@ def get_pivot_signal(ticker):
     except Exception as e:
         print(f"Pivot錯誤 {ticker}: {e}")
         return None, None, None
+
+def get_premarket_change(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        pre = stock.info.get('preMarketPrice')
+        prev_close = stock.info.get('regularMarketPreviousClose')
+        if pre and prev_close:
+            change_pct = (pre - prev_close) / prev_close * 100
+            return pre, change_pct
+    except:
+        pass
+    return None, None
 
 def fetch_news(query, from_date, to_date):
     if NEWSAPI_KEY:
@@ -134,31 +159,20 @@ def analyze_news(news_titles):
     return avg, details, top3
 
 def get_fundamental_signal(ticker):
-    """
-    取得簡易基本面信號:
-    signal: -1 (高估), 0 (合理), 1 (低估)
-    text: 簡短描述
-    """
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-
         pe = info.get('forwardPE') or info.get('trailingPE')
         pb = info.get('priceToBook')
         div_yield = info.get('dividendYield')
-
-        # 根據標的設定不同的閾值
         if ticker == "QQQ":
-            # QQQ 是科技成長型，PE 通常較高
             pe_low, pe_high = 25, 35
             pb_high = 8
-        else:  # 騰訊
+        else:
             pe_low, pe_high = 15, 25
             pb_high = 5
-
         signals = []
         details = []
-
         if pe:
             details.append(f"PE:{pe:.1f}")
             if pe < pe_low:
@@ -167,21 +181,17 @@ def get_fundamental_signal(ticker):
                 signals.append(-1)
             else:
                 signals.append(0)
-
         if pb:
             details.append(f"PB:{pb:.1f}")
             if pb > pb_high:
                 signals.append(-1)
             else:
                 signals.append(0)
-
         if div_yield and div_yield > 0.03:
             details.append(f"息率:{div_yield*100:.1f}%")
             signals.append(1)
-
         if not signals:
             return 0, "無足夠數據"
-
         avg_signal = sum(signals) / len(signals)
         if avg_signal > 0.3:
             signal, ver = 1, "低估"
@@ -189,20 +199,15 @@ def get_fundamental_signal(ticker):
             signal, ver = -1, "高估"
         else:
             signal, ver = 0, "合理"
-
         text = f"{ver} ({', '.join(details)})"
         return signal, text
-    except Exception as e:
-        print(f"基本面取得失敗 {ticker}: {e}")
+    except:
         return 0, "數據缺失"
 
 def send_whatsapp(text):
     encoded = urllib.parse.quote(text)
     url = f"https://api.callmebot.com/whatsapp.php?phone={WHATSAPP_PHONE}&text={encoded}&apikey={WHATSAPP_API_KEY}"
-    try:
-        requests.get(url, timeout=10)
-    except Exception as e:
-        print(f"發送失敗: {e}")
+    requests.get(url, timeout=10)
 
 def send_report_safe(report, max_chars=1400):
     if len(report) <= max_chars:
@@ -212,10 +217,11 @@ def send_report_safe(report, max_chars=1400):
             send_whatsapp(report[i:i+max_chars])
 
 # ----------------------------- 報告產生 -----------------------------
-def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events, fund_signal, fund_text):
+def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, events,
+                 fund_signal, fund_text, pre_price, pre_chg, weights):
     today = datetime.date.today()
     if not pivot_data:
-        return None
+        return None, None  # 第二個回傳值為信號字典
 
     p = pivot_data
     price = p['close']
@@ -225,8 +231,26 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
 
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
 
-    # 綜合分數：技術 30% + 新聞 40% + 基本面 30%
-    final_score = 0.3 * p['signal'] + 0.4 * news_signal + 0.3 * fund_signal
+    # 盤前調整
+    pre_bonus = 0
+    pre_note = ""
+    if pre_price:
+        pre_note = f"盤前: {pre_price:.2f} ({pre_chg:+.2f}%)"
+        if pre_price > r1:
+            pre_bonus = 0.3
+            pre_note += " 已破R1"
+        elif pre_price > pivot:
+            pre_bonus = 0.1
+        elif pre_price < s1:
+            pre_bonus = -0.3
+            pre_note += " 已破S1"
+        elif pre_price < pivot:
+            pre_bonus = -0.1
+
+    # 使用動態權重計算最終分數
+    final_score = (weights["tech"] * (p['signal'] + pre_bonus) +
+                   weights["news"] * news_signal +
+                   weights["fund"] * fund_signal)
 
     event_str = ""
     if events:
@@ -237,28 +261,50 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # 單一最可能預測與操作
+    # 預測與操作
     if final_score > 0.4:
         prediction = "📈 上升 (做多)"
-        plan = f"操作：突破 R1 {r1:.2f} 後做多，目標 R2 {r2:.2f}，止損設 Pivot {pivot:.2f}"
+        plan = (
+            f"入場：突破 R1 {r1:.2f} 後買入看漲期權\n"
+            f"目標：R2 {r2:.2f}\n"
+            f"止損：跌破 Pivot {pivot:.2f} 或期權價值減半"
+        )
     elif final_score < -0.4:
         prediction = "📉 下跌 (做空)"
-        plan = f"操作：跌破 S1 {s1:.2f} 後做空，目標 S2 {s2:.2f}，止損設 Pivot {pivot:.2f}"
+        plan = (
+            f"入場：跌破 S1 {s1:.2f} 後買入看跌期權\n"
+            f"目標：S2 {s2:.2f}\n"
+            f"止損：升破 Pivot {pivot:.2f} 或期權價值減半"
+        )
     else:
         prediction = "↔️ 震盪 (區間交易)"
-        plan = f"操作：於 S1 {s1:.2f} 附近做多，R1 {r1:.2f} 附近做空，止損設區間外 S2 {s2:.2f} / R2 {r2:.2f}"
+        plan = (
+            f"入場：於 S1 {s1:.2f} 賣出看跌期權，R1 {r1:.2f} 賣出看漲期權\n"
+            f"止損：標的突破 S2 {s2:.2f} 或 R2 {r2:.2f} 立即平倉"
+        )
 
     report = (
         f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
         f"💰 前收: {price:.2f}  樞軸: {pivot:.2f}\n"
+        f"{pre_note + chr(10) if pre_note else ''}"
         f"📊 基本面: {fund_text}\n"
         f"🗞️ 新聞情緒: {news_avg:.2f}\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
         f"🎯 預測: {prediction}\n"
-        f"{plan}"
+        f"{plan}\n"
+        f"⚡ 0DTE警告：嚴格止損，時間價值損耗快，僅限極短線。"
     )
-    return report
+
+    # 返回報告文字與信號字典（用於寫入歷史）
+    signals = {
+        "tech_signal": p['signal'],
+        "news_signal": news_signal,
+        "fund_signal": fund_signal,
+        "pre_bonus": pre_bonus,
+        "final_score": final_score
+    }
+    return report, signals
 
 # ----------------------------- 主流程 -----------------------------
 def main():
@@ -271,8 +317,9 @@ def main():
             target = "0700.HK"
 
     today = datetime.date.today()
-    week_ago = today - datetime.timedelta(days=7)
+    since = (today - datetime.timedelta(days=1)).isoformat()
     events = get_today_events()
+    weights = load_weights()  # 讀取最新權重
 
     for name, ticker in TICKERS.items():
         if target and ticker != target:
@@ -283,19 +330,41 @@ def main():
             send_whatsapp(f"⚠️ {name} 數據缺失")
             continue
 
+        pre_price, pre_chg = get_premarket_change(ticker)
+
         query = NEWS_QUERIES.get(ticker, name)
-        titles = fetch_news(query, week_ago.isoformat(), today.isoformat())
+        titles = fetch_news(query, since, today.isoformat())
         if not titles:
             titles = ["無相關新聞"]
         news_avg, _, top3 = analyze_news(titles)
 
         fund_signal, fund_text = get_fundamental_signal(ticker)
 
-        report = build_report(name, ticker, TRADE_MAP.get(ticker, name),
-                             pivot_data, news_avg, top3, events,
-                             fund_signal, fund_text)
+        report, signals = build_report(name, ticker, TRADE_MAP.get(ticker, name),
+                                       pivot_data, news_avg, top3, events,
+                                       fund_signal, fund_text, pre_price, pre_chg, weights)
         if report:
             send_report_safe(report)
+
+            # 寫入歷史記錄（供 update_weights.py 使用）
+            history_file = f"history_{TRADE_MAP[ticker]}.json"
+            entry = {
+                "date": today.isoformat(),
+                "ticker": ticker,
+                "tech_signal": signals["tech_signal"],
+                "news_signal": signals["news_signal"],
+                "fund_signal": signals["fund_signal"],
+                "final_score": signals["final_score"],
+                "weights": weights
+            }
+            try:
+                with open(history_file, "r") as f:
+                    hist = json.load(f)
+            except:
+                hist = []
+            hist.append(entry)
+            with open(history_file, "w") as f:
+                json.dump(hist, f, indent=2)
 
 if __name__ == "__main__":
     main()
