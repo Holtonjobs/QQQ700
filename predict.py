@@ -81,11 +81,8 @@ def load_weights():
     except:
         return DEFAULT_WEIGHTS
 
-# ----------------------------- Traditional Pivot 計算 -----------------------------
+# ----------------------------- 工具函數 -----------------------------
 def get_pivot_traditional(ticker):
-    """
-    計算 Traditional Pivot Points，回傳 R1~R5, S1~S5, PP, signal, close
-    """
     try:
         data = yf.download(ticker, period="2d", progress=False)
         if len(data) < 2:
@@ -106,23 +103,17 @@ def get_pivot_traditional(ticker):
         r5 = 4 * pp + (h - 4 * l)
         s5 = 4 * pp - (4 * h - l)
 
-        # 技術信號：收盤相對 PP
-        if c > pp:
-            signal = 1
-        elif c < pp:
-            signal = -1
-        else:
-            signal = 0
+        signal = 1 if c > pp else (-1 if c < pp else 0)
 
         return {
             'pp': pp,
             'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4, 'r5': r5,
             's1': s1, 's2': s2, 's3': s3, 's4': s4, 's5': s5,
             'close': c, 'signal': signal,
-            'high': h, 'low': l
+            'high': h, 'low': l, 'range': rng
         }, signal, c
     except Exception as e:
-        print(f"Traditional Pivot錯誤 {ticker}: {e}")
+        print(f"Pivot錯誤 {ticker}: {e}")
         return None, None, None
 
 def get_premarket_change(ticker):
@@ -182,7 +173,7 @@ def get_fundamental_signal(ticker):
         info = stock.info
         pe = info.get('forwardPE') or info.get('trailingPE')
         pb = info.get('priceToBook')
-        div_yield = info.get('dividendYield')
+        div_yield = info.get('dividendYield')   # 部分標的會有異常值，需過濾
         if ticker == "QQQ":
             pe_low, pe_high = 25, 35
             pb_high = 8
@@ -205,9 +196,11 @@ def get_fundamental_signal(ticker):
                 signals.append(-1)
             else:
                 signals.append(0)
-        if div_yield and div_yield > 0.03:
+        if div_yield and div_yield > 0.03 and div_yield < 0.15:   # 過濾掉離譜的高息率
             details.append(f"息率:{div_yield*100:.1f}%")
             signals.append(1)
+        elif div_yield and div_yield >= 0.15:
+            details.append(f"息率異常({div_yield*100:.1f}%)，已忽略")
         if not signals:
             return 0, "無足夠數據"
         avg_signal = sum(signals) / len(signals)
@@ -244,10 +237,27 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
     p = pivot_data
     price = p['close']
     pp = p['pp']
-    r1, r2, r3, r4, r5 = p['r1'], p['r2'], p['r3'], p['r4'], p['r5']
-    s1, s2, s3, s4, s5 = p['s1'], p['s2'], p['s3'], p['s4'], p['s5']
+    r1, r2, r3 = p['r1'], p['r2'], p['r3']
+    s1, s2, s3 = p['s1'], p['s2'], p['s3']
+    rng = p['range']
 
+    # 波動率調整：前日波動幅度 / 價格
+    vol_pct = (rng / price) * 100
+    is_low_vol = vol_pct < 1.0   # 窄幅震盪
+
+    # 新聞信號
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
+
+    # 新聞中性時，動態調整權重：提高技術權重，降低新聞權重
+    adj_weights = weights.copy()
+    if abs(news_avg) <= 0.1:
+        adj_weights["tech"] = min(0.6, adj_weights["tech"] + 0.15)
+        adj_weights["news"] = max(0.2, adj_weights["news"] - 0.15)
+        # 重新歸一化
+        total = adj_weights["tech"] + adj_weights["news"] + adj_weights["fund"]
+        adj_weights["tech"] /= total
+        adj_weights["news"] /= total
+        adj_weights["fund"] /= total
 
     pre_bonus = 0
     pre_note = ""
@@ -264,9 +274,9 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         elif pre_price < pp:
             pre_bonus = -0.1
 
-    final_score = (weights["tech"] * (p['signal'] + pre_bonus) +
-                   weights["news"] * news_signal +
-                   weights["fund"] * fund_signal)
+    final_score = (adj_weights["tech"] * (p['signal'] + pre_bonus) +
+                   adj_weights["news"] * news_signal +
+                   adj_weights["fund"] * fund_signal)
 
     event_str = ""
     if events:
@@ -277,45 +287,64 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # 操作建議（Traditional 模式，以 R1/S1 為觸發，目標 R2/S2，止損 PP）
-    if final_score > 0.4:
+    # 決定預測方向與操作計畫
+    threshold = 0.6 if is_low_vol else 0.4   # 低波動時用更嚴格的門檻
+
+    if final_score > threshold:
         prediction = "📈 上升 (做多)"
-        plan = (
-            f"入場：突破 R1 {r1:.2f} 後買入看漲期權\n"
-            f"目標：R2 {r2:.2f}，延伸目標 R3 {r3:.2f}\n"
-            f"止損：跌破 PP {pp:.2f} 或期權價值減半"
-        )
-    elif final_score < -0.4:
+        entry = r1
+        target = r2
+        stop = pp
+        ext_target = r3
+        # 盈虧比檢查
+        reward = target - entry
+        risk = entry - stop
+        if reward / risk < 1.5:
+            plan = (f"⚠️ 盈虧比不佳 ({reward/risk:.1f})，建議觀望\n"
+                    f"若仍想操作：突破 R1 {r1:.2f} 後買入看漲期權，目標 R2 {r2:.2f}，止損 PP {pp:.2f}")
+        else:
+            plan = (f"入場：突破 R1 {r1:.2f} 後買入看漲期權\n"
+                    f"目標：R2 {r2:.2f}，延伸目標 R3 {r3:.2f}\n"
+                    f"止損：跌破 PP {pp:.2f} 或期權價值減半\n"
+                    f"⚙️ 動態管理：若價格達 R1+0.3*Range ({r1+0.3*rng:.2f})，將止損上移至入場價")
+    elif final_score < -threshold:
         prediction = "📉 下跌 (做空)"
-        plan = (
-            f"入場：跌破 S1 {s1:.2f} 後買入看跌期權\n"
-            f"目標：S2 {s2:.2f}，延伸目標 S3 {s3:.2f}\n"
-            f"止損：升破 PP {pp:.2f} 或期權價值減半"
-        )
+        entry = s1
+        target = s2
+        stop = pp
+        ext_target = s3
+        reward = entry - target
+        risk = stop - entry
+        if reward / risk < 1.5:
+            plan = (f"⚠️ 盈虧比不佳 ({reward/risk:.1f})，建議觀望\n"
+                    f"若仍想操作：跌破 S1 {s1:.2f} 後買入看跌期權，目標 S2 {s2:.2f}，止損 PP {pp:.2f}")
+        else:
+            plan = (f"入場：跌破 S1 {s1:.2f} 後買入看跌期權\n"
+                    f"目標：S2 {s2:.2f}，延伸目標 S3 {s3:.2f}\n"
+                    f"止損：升破 PP {pp:.2f} 或期權價值減半\n"
+                    f"⚙️ 動態管理：若價格達 S1-0.3*Range ({s1-0.3*rng:.2f})，將止損下移至入場價")
     else:
         prediction = "↔️ 震盪 (區間交易)"
-        plan = (
-            f"操作：於 S1 {s1:.2f} 附近買入看漲期權，目標 R1 {r1:.2f}\n"
-            f"　　　或於 R1 {r1:.2f} 附近買入看跌期權，目標 S1 {s1:.2f}\n"
-            f"止損：突破 S2 {s2:.2f} 或 R2 {r2:.2f}"
-        )
+        plan = (f"操作：於 S1 {s1:.2f} 附近買入看漲期權，目標 R1 {r1:.2f}\n"
+                f"　　　或於 R1 {r1:.2f} 附近買入看跌期權，目標 S1 {s1:.2f}\n"
+                f"止損：突破 S2 {s2:.2f} 或 R2 {r2:.2f}")
 
     ext_levels = (
-        f"R1:{r1:.1f} R2:{r2:.1f} R3:{r3:.1f} R4:{r4:.1f} R5:{r5:.1f}\n"
-        f"S1:{s1:.1f} S2:{s2:.1f} S3:{s3:.1f} S4:{s4:.1f} S5:{s5:.1f}"
+        f"R1:{r1:.1f} R2:{r2:.1f} R3:{r3:.1f}\n"
+        f"S1:{s1:.1f} S2:{s2:.1f} S3:{s3:.1f}"
     )
 
     report = (
         f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
-        f"💰 前收: {price:.2f}  樞軸(Trad): {pp:.2f}\n"
+        f"💰 前收: {price:.2f}  樞軸(Trad): {pp:.2f}  日波幅: {vol_pct:.1f}%\n"
         f"{pre_note + chr(10) if pre_note else ''}"
         f"📊 基本面: {fund_text}\n"
-        f"🗞️ 新聞情緒: {news_avg:.2f}\n"
+        f"🗞️ 新聞情緒: {news_avg:.2f}  (權重調整: T{adj_weights['tech']:.2f} N{adj_weights['news']:.2f} F{adj_weights['fund']:.2f})\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
         f"🎯 預測: {prediction}\n"
         f"{plan}\n"
-        f"📐 延伸水平:\n{ext_levels}\n"
+        f"📐 關鍵水平:\n{ext_levels}\n"
         f"⚡ 0DTE警告：嚴格止損，時間價值損耗快，僅限極短線。"
     )
 
@@ -368,7 +397,6 @@ def main():
         if report:
             send_report_safe(report)
 
-            # 寫入歷史記錄
             history_file = f"history_{TRADE_MAP[ticker]}.json"
             entry = {
                 "date": today.isoformat(),
