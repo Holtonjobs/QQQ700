@@ -1,0 +1,14 @@
+name: Keep Alive
+on:
+  schedule:
+    - cron: '0 0 1 * *'   # 每月1號 UTC 00:00
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config --global user.name 'bot'
+          git config --global user.email 'bot@example.com'
+          git commit --allow-empty -m "keepalive"
+          git push
