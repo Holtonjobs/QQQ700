@@ -81,27 +81,48 @@ def load_weights():
     except:
         return DEFAULT_WEIGHTS
 
-# ----------------------------- 工具函數 -----------------------------
-def get_pivot_signal(ticker):
+# ----------------------------- Traditional Pivot 計算 -----------------------------
+def get_pivot_traditional(ticker):
+    """
+    計算 Traditional Pivot Points，回傳 R1~R5, S1~S5, PP, signal, close
+    """
     try:
         data = yf.download(ticker, period="2d", progress=False)
         if len(data) < 2:
             return None, None, None
         prev = data.iloc[-2]
         h, l, c = float(prev['High']), float(prev['Low']), float(prev['Close'])
-        pivot = (h + l + c) / 3
-        r1 = 2 * pivot - l
-        r2 = pivot + (h - l)
-        s1 = 2 * pivot - h
-        s2 = pivot - (h - l)
-        signal = 1 if c > pivot else (-1 if c < pivot else 0)
+        pp = (h + l + c) / 3
+        rng = h - l
+
+        r1 = 2 * pp - l
+        s1 = 2 * pp - h
+        r2 = pp + rng
+        s2 = pp - rng
+        r3 = 2 * pp + (h - 2 * l)
+        s3 = 2 * pp - (2 * h - l)
+        r4 = 3 * pp + (h - 3 * l)
+        s4 = 3 * pp - (3 * h - l)
+        r5 = 4 * pp + (h - 4 * l)
+        s5 = 4 * pp - (4 * h - l)
+
+        # 技術信號：收盤相對 PP
+        if c > pp:
+            signal = 1
+        elif c < pp:
+            signal = -1
+        else:
+            signal = 0
+
         return {
-            'pivot': pivot, 'r1': r1, 'r2': r2,
-            's1': s1, 's2': s2, 'close': c, 'signal': signal,
+            'pp': pp,
+            'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4, 'r5': r5,
+            's1': s1, 's2': s2, 's3': s3, 's4': s4, 's5': s5,
+            'close': c, 'signal': signal,
             'high': h, 'low': l
         }, signal, c
     except Exception as e:
-        print(f"Pivot錯誤 {ticker}: {e}")
+        print(f"Traditional Pivot錯誤 {ticker}: {e}")
         return None, None, None
 
 def get_premarket_change(ticker):
@@ -222,9 +243,9 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
 
     p = pivot_data
     price = p['close']
-    pivot = p['pivot']
-    r1, r2 = p['r1'], p['r2']
-    s1, s2 = p['s1'], p['s2']
+    pp = p['pp']
+    r1, r2, r3, r4, r5 = p['r1'], p['r2'], p['r3'], p['r4'], p['r5']
+    s1, s2, s3, s4, s5 = p['s1'], p['s2'], p['s3'], p['s4'], p['s5']
 
     news_signal = 1 if news_avg > 0.15 else (-1 if news_avg < -0.15 else 0)
 
@@ -235,12 +256,12 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         if pre_price > r1:
             pre_bonus = 0.3
             pre_note += " 已破R1"
-        elif pre_price > pivot:
+        elif pre_price > pp:
             pre_bonus = 0.1
         elif pre_price < s1:
             pre_bonus = -0.3
             pre_note += " 已破S1"
-        elif pre_price < pivot:
+        elif pre_price < pp:
             pre_bonus = -0.1
 
     final_score = (weights["tech"] * (p['signal'] + pre_bonus) +
@@ -256,39 +277,45 @@ def build_report(name, ticker, trade_inst, pivot_data, news_avg, top3_news, even
         emoji = "🟢" if score > 0.1 else "🔴" if score < -0.1 else "⚪"
         news_lines.append(f"{emoji} [{weight}x] {title[:80]}")
 
-    # 操作建議（震盪改為有限風險買方策略）
+    # 操作建議（Traditional 模式，以 R1/S1 為觸發，目標 R2/S2，止損 PP）
     if final_score > 0.4:
         prediction = "📈 上升 (做多)"
         plan = (
             f"入場：突破 R1 {r1:.2f} 後買入看漲期權\n"
-            f"目標：R2 {r2:.2f}\n"
-            f"止損：跌破 Pivot {pivot:.2f} 或期權價值減半"
+            f"目標：R2 {r2:.2f}，延伸目標 R3 {r3:.2f}\n"
+            f"止損：跌破 PP {pp:.2f} 或期權價值減半"
         )
     elif final_score < -0.4:
         prediction = "📉 下跌 (做空)"
         plan = (
             f"入場：跌破 S1 {s1:.2f} 後買入看跌期權\n"
-            f"目標：S2 {s2:.2f}\n"
-            f"止損：升破 Pivot {pivot:.2f} 或期權價值減半"
+            f"目標：S2 {s2:.2f}，延伸目標 S3 {s3:.2f}\n"
+            f"止損：升破 PP {pp:.2f} 或期權價值減半"
         )
     else:
         prediction = "↔️ 震盪 (區間交易)"
         plan = (
-            f"操作：於支撐 S1 {s1:.2f} 附近買入看漲期權，目標 R1 {r1:.2f}\n"
-            f"　　　或於阻力 R1 {r1:.2f} 附近買入看跌期權，目標 S1 {s1:.2f}\n"
-            f"止損：價格突破 S2 {s2:.2f} 或 R2 {r2:.2f}，平倉反向單"
+            f"操作：於 S1 {s1:.2f} 附近買入看漲期權，目標 R1 {r1:.2f}\n"
+            f"　　　或於 R1 {r1:.2f} 附近買入看跌期權，目標 S1 {s1:.2f}\n"
+            f"止損：突破 S2 {s2:.2f} 或 R2 {r2:.2f}"
         )
+
+    ext_levels = (
+        f"R1:{r1:.1f} R2:{r2:.1f} R3:{r3:.1f} R4:{r4:.1f} R5:{r5:.1f}\n"
+        f"S1:{s1:.1f} S2:{s2:.1f} S3:{s3:.1f} S4:{s4:.1f} S5:{s5:.1f}"
+    )
 
     report = (
         f"📅 {today.isoformat()} | {name} ({trade_inst})\n"
         f"{event_str}"
-        f"💰 前收: {price:.2f}  樞軸: {pivot:.2f}\n"
+        f"💰 前收: {price:.2f}  樞軸(Trad): {pp:.2f}\n"
         f"{pre_note + chr(10) if pre_note else ''}"
         f"📊 基本面: {fund_text}\n"
         f"🗞️ 新聞情緒: {news_avg:.2f}\n"
         f"--- 關鍵新聞 ---\n" + "\n".join(news_lines) + "\n"
         f"🎯 預測: {prediction}\n"
         f"{plan}\n"
+        f"📐 延伸水平:\n{ext_levels}\n"
         f"⚡ 0DTE警告：嚴格止損，時間價值損耗快，僅限極短線。"
     )
 
@@ -320,7 +347,7 @@ def main():
         if target and ticker != target:
             continue
 
-        pivot_data, _, _ = get_pivot_signal(ticker)
+        pivot_data, _, _ = get_pivot_traditional(ticker)
         if not pivot_data:
             send_whatsapp(f"⚠️ {name} 數據缺失")
             continue
