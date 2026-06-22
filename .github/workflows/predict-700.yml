@@ -1,7 +1,7 @@
 name: Predict Tencent 700
 on:
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 18 * * *'
   workflow_dispatch:
 jobs:
   predict:
