@@ -1,14 +1,14 @@
 name: Predict QQQ
 on:
   schedule:
-    - cron: '0 13 * * *'
+    - cron: '0 13 * * *'   # UTC 13:00 = 香港 21:00
   workflow_dispatch:
 jobs:
   predict:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4          # 更新到 v4
+      - uses: actions/setup-python@v5      # 更新到 v5
         with:
           python-version: '3.10'
       - name: Install dependencies
